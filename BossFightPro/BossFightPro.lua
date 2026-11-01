@@ -1,119 +1,360 @@
-title.Active = true
-    title.Parent = frame
-    Instance.new("UICorner",title).CornerRadius = UDim.new(0,12)
 
-    local floating = Instance.new("TextButton")
-    floating.Size = UDim2.fromOffset(45,45)
-    floating.Position = UDim2.new(0.78,0,0.08,0)
-    floating.BackgroundColor3 = Color3.fromRGB(0,130,255)
-    floating.TextColor3 = Color3.new(1,1,1)
-    floating.Font = Enum.Font.GothamBold
-    floating.TextSize = 18
-    floating.Text = "⚙"
-    floating.Parent = gui
-    Instance.new("UICorner",floating).CornerRadius = UDim.new(1,0)
-    floating.MouseButton1Click:Connect(function() frame.Visible = not frame.Visible end)
+-- Boss Fight Pro
+-- Client-side menu for Roblox
+-- The damage multiplier is a preview only.
+-- Actual boss damage must be handled by the game server.
 
-    local function toggle(name, y, getState, callback)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1,-20,0,34)
-        btn.Position = UDim2.fromOffset(10,y)
-        btn.TextColor3 = Color3.new(1,1,1)
-        btn.Font = Enum.Font.GothamSemibold
-        btn.TextSize = 11
-        btn.Parent = frame
-        Instance.new("UICorner",btn).CornerRadius = UDim.new(0,8)
-        local function refresh()
-            local state = getState()
-            btn.Text = name .. (state and ": ON" or ": OFF")
-            btn.BackgroundColor3 = state and Color3.fromRGB(0,130,255) or Color3.fromRGB(45,45,55)
-        end
-        btn.MouseButton1Click:Connect(function() callback(not getState()); refresh() end)
-        refresh()
-    end
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
-    toggle("Fly + God Mode",45,function() return flying and godMode end,function(v)
-        if v then startFly(); enableGodMode() else stopFly(); disableGodMode() end
-    end)
-    toggle("Speed Boost",85,function() return speedEnabled end,function(v)
-        speedEnabled = v
-        if not v and humanoid then humanoid.WalkSpeed = originalWalkSpeed or 16 end
-    end)
-    toggle("Instant 1-Hit Boss Kill (local)",125,function() return instantKillEnabled end,function(v) instantKillEnabled = v end)
-    toggle("Auto Punch / Attack",165,function() return autoPunchEnabled end,function(v) autoPunchEnabled = v end)
-    toggle("Cosmic Slime Damage x1000",205,function() return slimeBoostEnabled end,function(v)
-        slimeBoostEnabled = v
-        previewSlimeDamage()
-    end)
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 
-    local note = Instance.new("TextLabel")
-    note.Size = UDim2.new(1,-20,0,30)
-    note.Position = UDim2.fromOffset(10,245)
-    note.BackgroundTransparency = 1
-    note.TextWrapped = true
-    note.TextColor3 = Color3.fromRGB(190,190,195)
-    note.Font = Enum.Font.Gotham
-    note.TextSize = 10
-    note.Text = "Slime boost previews damage; server integration required"
-    note.Parent = frame
-
-    local hide = Instance.new("TextButton")
-    hide.Size = UDim2.new(1,-20,0,32)
-    hide.Position = UDim2.fromOffset(10,290)
-    hide.BackgroundColor3 = Color3.fromRGB(180,40,40)
-    hide.TextColor3 = Color3.new(1,1,1)
-    hide.Font = Enum.Font.GothamBold
-    hide.TextSize = 12
-    hide.Text = "Hide Menu"
-    hide.Parent = frame
-    Instance.new("UICorner",hide).CornerRadius = UDim.new(0,8)
-    hide.MouseButton1Click:Connect(function() frame.Visible = false end)
-
-    local dragging, dragStart, startPos = false, nil, nil
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true; dragStart = input.Position; startPos = frame.Position
-        end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,startPos.Y.Scale,startPos.Y.Offset+delta.Y)
-        end
-    end)
-    UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end)
+-- Remove old menu if script is run again
+local oldGui = playerGui:FindFirstChild("BossProMenu")
+if oldGui then
+    oldGui:Destroy()
 end
 
-createUI()
-local attackAccumulator = 0
-runtimeConnection = RunService.Heartbeat:Connect(function(dt)
-    if not character or not humanoid or not root then return end
-    if speedEnabled then humanoid.WalkSpeed = CUSTOM_WALK_SPEED end
-    -- Local-only test. Server-authoritative bosses will ignore client-side health edits.
-    if instantKillEnabled then
-        for _, obj in ipairs(Workspace:GetChildren()) do
-            if obj:IsA("Model") and (obj.Name:find("Boss") or obj.Name:find("Treant") or obj.Name:find("Thornhart")) then
-                local bossHum = obj:FindFirstChildOfClass("Humanoid")
-                if bossHum and bossHum.Health > 0 then bossHum.Health = 0 end
-            end
-        end
+if _G.BossFightProCleanup then
+    _G.BossFightProCleanup()
+end
+
+local connections = {}
+local function track(connection)
+    table.insert(connections, connection)
+    return connection
+end
+
+local flying = false
+local godMode = false
+local speedBoost = false
+local oneHit = false
+local autoAttack = false
+local slimeBoost = false
+
+local normalSpeed = 16
+local boostSpeed = 50
+local flySpeed = 55
+
+local character, humanoid, root
+local flyVelocity
+local flyGyro
+
+local function updateCharacter()
+    character = player.Character or player.CharacterAdded:Wait()
+    humanoid = character:WaitForChild("Humanoid")
+    root = character:WaitForChild("HumanoidRootPart")
+    normalSpeed = humanoid.WalkSpeed
+
+    if speedBoost then
+        humanoid.WalkSpeed = boostSpeed
     end
-    attackAccumulator += dt
-    if autoPunchEnabled and attackAccumulator >= 0.15 then
-        attackAccumulator = 0
-        local tool = character:FindFirstChildOfClass("Tool")
-        if tool then tool:Activate() end
+end
+
+updateCharacter()
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "BossProMenu"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = false
+gui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.Size = UDim2.fromOffset(245, 355)
+frame.Position = UDim2.new(0.5, -122, 0.5, -177)
+frame.BackgroundColor3 = Color3.fromRGB(24, 28, 40)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+
+Instance.new("UICorner", frame).CornerRadius =
+    UDim.new(0, 12)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -50, 0, 40)
+title.Position = UDim2.fromOffset(10, 0)
+title.BackgroundTransparency = 1
+title.Text = "BOSS FIGHT PRO"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local minimize = Instance.new("TextButton")
+minimize.Size = UDim2.fromOffset(34, 30)
+minimize.Position = UDim2.new(1, -40, 0, 5)
+minimize.BackgroundColor3 = Color3.fromRGB(60, 65, 85)
+minimize.Text = "—"
+minimize.TextColor3 = Color3.new(1, 1, 1)
+minimize.TextSize = 20
+minimize.Parent = frame
+Instance.new("UICorner", minimize).CornerRadius =
+    UDim.new(0, 8)
+
+local floating = Instance.new("TextButton")
+floating.Name = "OpenButton"
+floating.Size = UDim2.fromOffset(52, 52)
+floating.Position = UDim2.new(0.8, 0, 0.15, 0)
+floating.BackgroundColor3 = Color3.fromRGB(0, 130, 255)
+floating.Text = "⚙"
+floating.TextColor3 = Color3.new(1, 1, 1)
+floating.TextSize = 27
+floating.Font = Enum.Font.GothamBold
+floating.Active = true
+floating.Draggable = true
+floating.Visible = false
+floating.Parent = gui
+Instance.new("UICorner", floating).CornerRadius =
+    UDim.new(1, 0)
+
+local function setMenuVisible(visible)
+    frame.Visible = visible
+    floating.Visible = not visible
+end
+
+minimize.MouseButton1Click:Connect(function()
+    setMenuVisible(false)
+end)
+
+floating.MouseButton1Click:Connect(function()
+    setMenuVisible(true)
+end)
+
+local function createToggle(label, y, getState, callback)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, -20, 0, 36)
+    button.Position = UDim2.fromOffset(10, y)
+    button.BorderSizePixel = 0
+    button.TextColor3 = Color3.new(1, 1, 1)
+    button.Font = Enum.Font.GothamSemibold
+    button.TextSize = 12
+    button.Parent = frame
+
+    Instance.new("UICorner", button).CornerRadius =
+        UDim.new(0, 8)
+
+    local function refresh()
+        local enabled = getState()
+        button.Text = label .. (enabled and " : ON" or " : OFF")
+        button.BackgroundColor3 = enabled
+            and Color3.fromRGB(0, 145, 100)
+            or Color3.fromRGB(55, 60, 78)
+    end
+
+    button.MouseButton1Click:Connect(function()
+        callback(not getState())
+        refresh()
+    end)
+
+    refresh()
+    return button
+end
+
+local function stopFly()
+    flying = false
+
+    if flyVelocity then
+        flyVelocity:Destroy()
+        flyVelocity = nil
+    end
+
+    if flyGyro then
+        flyGyro:Destroy()
+        flyGyro = nil
+    end
+
+    if humanoid then
+        humanoid.PlatformStand = false
+    end
+end
+
+local function startFly()
+    if not root or not humanoid then
+        return
+    end
+
+    stopFly()
+    flying = true
+
+    flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    flyVelocity.Velocity = Vector3.zero
+    flyVelocity.Parent = root
+
+    flyGyro = Instance.new("BodyGyro")
+    flyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    flyGyro.P = 10000
+    flyGyro.Parent = root
+
+    humanoid.PlatformStand = true
+end
+
+local function applySpeed()
+    if humanoid then
+        humanoid.WalkSpeed =
+            speedBoost and boostSpeed or normalSpeed
+    end
+end
+
+local function getSlimeDamage()
+    local petField = workspace:FindFirstChild("PetField")
+    if not petField then
+        return nil
+    end
+
+    local playerFolder =
+        petField:FindFirstChild(tostring(player.UserId))
+
+    if not playerFolder then
+        return nil
+    end
+
+    local slime =
+        playerFolder:FindFirstChild("CosmicPumpkinKingSlime")
+
+    if not slime then
+        return nil
+    end
+
+    local baseDamage = slime:GetAttribute("Damage")
+    if type(baseDamage) ~= "number" then
+        return nil
+    end
+
+    return baseDamage * (slimeBoost and 1000 or 1)
+end
+
+createToggle("Fly + God Mode", 48, function()
+    return flying
+end, function(state)
+    godMode = state
+
+    if state then
+        startFly()
+    else
+        stopFly()
     end
 end)
 
-player.CharacterAdded:Connect(function(char)
-    stopFly()
-    if healthConnection then healthConnection:Disconnect(); healthConnection = nil end
-    bindCharacter(char)
-    if godMode then enableGodMode() end
-    if speedEnabled then humanoid.WalkSpeed = CUSTOM_WALK_SPEED end
-    if flying then startFly() end
+createToggle("Speed Boost", 91, function()
+    return speedBoost
+end, function(state)
+    speedBoost = state
+    applySpeed()
 end)
-print("[Boss Pro] Loaded. Cosmic Pumpkin King x1000 is preview-only until server integration.")
+
+createToggle("1-Hit Boss (Local Test)", 134, function()
+    return oneHit
+end, function(state)
+    oneHit = state
+end)
+
+createToggle("Auto Attack (Local)", 177, function()
+    return autoAttack
+end, function(state)
+    autoAttack = state
+end)
+
+createToggle("Slime Damage x1000 Preview", 220, function()
+    return slimeBoost
+end, function(state)
+    slimeBoost = state
+
+    local damage = getSlimeDamage()
+    print("[Boss Pro] Slime preview damage:", damage)
+end)
+
+local damageLabel = Instance.new("TextLabel")
+damageLabel.Size = UDim2.new(1, -20, 0, 42)
+damageLabel.Position = UDim2.fromOffset(10, 268)
+damageLabel.BackgroundTransparency = 1
+damageLabel.TextColor3 = Color3.fromRGB(210, 220, 240)
+damageLabel.TextWrapped = true
+damageLabel.Font = Enum.Font.Gotham
+damageLabel.TextSize = 12
+damageLabel.Parent = frame
+
+local footer = Instance.new("TextLabel")
+footer.Size = UDim2.new(1, -20, 0, 30)
+footer.Position = UDim2.fromOffset(10, 315)
+footer.BackgroundTransparency = 1
+footer.Text = "⚙ Minimize to keep the floating button"
+footer.TextColor3 = Color3.fromRGB(150, 165, 190)
+footer.TextSize = 11
+footer.Font = Enum.Font.Gotham
+footer.Parent = frame
+
+local elapsed = 0
+
+track(RunService.Heartbeat:Connect(function(dt)
+    elapsed += dt
+
+    if flying and root and humanoid then
+        local camera = workspace.CurrentCamera
+        if camera and flyVelocity and flyGyro then
+            local direction = humanoid.MoveDirection
+            local vertical = 0
+
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+                vertical = 1
+            elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+                vertical = -1
+            end
+
+            flyVelocity.Velocity =
+                direction * flySpeed +
+                Vector3.new(0, vertical * flySpeed, 0)
+
+            flyGyro.CFrame = camera.CFrame
+        end
+    end
+
+    if godMode and humanoid then
+        -- Client-side health display only.
+        -- The server controls real damage.
+        if humanoid.Health > 0 then
+            humanoid.Health =
+                math.max(humanoid.Health, humanoid.MaxHealth)
+        end
+    end
+
+    if elapsed >= 0.5 then
+        elapsed = 0
+
+        local damage = getSlimeDamage()
+        if damage then
+            damageLabel.Text =
+                "Cosmic Slime Damage Preview: " ..
+                tostring(damage)
+        else
+            damageLabel.Text =
+                "Cosmic Slime: Not found in PetField"
+        end
+
+        -- No unverified boss-damage remote calls.
+        -- Server-side combat must implement real damage.
+    end
+end))
+
+track(player.CharacterAdded:Connect(function()
+    stopFly()
+    updateCharacter()
+    applySpeed()
+end))
+
+_G.BossFightProCleanup = function()
+    stopFly()
+
+    for _, connection in ipairs(connections) do
+        connection:Disconnect()
+    end
+
+    gui:Destroy()
+end
+
+print("[Boss Pro] Menu loaded successfully")
